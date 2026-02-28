@@ -1,0 +1,5 @@
+venv/
+data/raw_videos
+__pycache__/
+*.pyc
+config/video_sources.json
