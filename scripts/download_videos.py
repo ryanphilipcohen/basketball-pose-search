@@ -1,12 +1,13 @@
 import argparse
 import json
+import re
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = PROJECT_ROOT / "config" / "video_sources.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "raw_videos"
-COOKIE_BROWSER_CANDIDATES = ("chrome", "edge", "firefox", "brave")
 
 
 def load_input(json_path):
@@ -32,7 +33,54 @@ def load_input(json_path):
     return links
 
 
-def download_video(video_link, output_dir, cookies_browser="auto"):
+def extract_video_id(video_link):
+    """
+    Extract a YouTube video ID from common URL formats.
+    Returns None when the ID cannot be determined.
+    """
+    try:
+        parsed = urlparse(video_link)
+    except Exception:
+        return None
+
+    host = parsed.netloc.lower()
+    path = parsed.path.strip("/")
+
+    # https://www.youtube.com/watch?v=<id>
+    if "youtube.com" in host:
+        qs = parse_qs(parsed.query)
+        if "v" in qs and qs["v"]:
+            return qs["v"][0]
+
+        # https://www.youtube.com/shorts/<id> or /embed/<id>
+        parts = path.split("/")
+        if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
+            return parts[1]
+
+    # https://youtu.be/<id>
+    if "youtu.be" in host and path:
+        return path.split("/")[0]
+
+    return None
+
+
+def already_downloaded(video_link, output_dir):
+    """
+    Check whether a file for this video ID already exists in output_dir.
+    """
+    video_id = extract_video_id(video_link)
+    if not video_id:
+        return False
+
+    safe_id = re.escape(video_id)
+    pattern = re.compile(rf".*\[{safe_id}\]\.[^.]+$")
+    for file_path in Path(output_dir).glob("*"):
+        if file_path.is_file() and pattern.match(file_path.name):
+            return True
+    return False
+
+
+def download_video(video_link, output_dir, cookies_browser="none"):
     """
     Use yt-dlp to download a single video link.
     Returns True on success, False on failure.
@@ -46,25 +94,12 @@ def download_video(video_link, output_dir, cookies_browser="auto"):
         output_template,
     ]
 
-    attempts = [("without cookies", [])]
-    if cookies_browser == "auto":
-        attempts.extend(
-            (f"with {browser} cookies", ["--cookies-from-browser", browser])
-            for browser in COOKIE_BROWSER_CANDIDATES
-        )
-    elif cookies_browser and cookies_browser.lower() != "none":
-        attempts.append(
-            (f"with {cookies_browser} cookies", ["--cookies-from-browser", cookies_browser])
-        )
+    if cookies_browser and cookies_browser.lower() != "none":
+        base_cmd.extend(["--cookies-from-browser", cookies_browser])
 
-    for attempt_label, extra_args in attempts:
-        print(f"  -> Attempt: {attempt_label}")
-        cmd = [*base_cmd, *extra_args, video_link]
-        result = subprocess.run(cmd, check=False)
-        if result.returncode == 0:
-            return True
-
-    return False
+    cmd = [*base_cmd, video_link]
+    result = subprocess.run(cmd, check=False)
+    return result.returncode == 0
 
 
 def main(input_path, output_path, cookies_browser):
@@ -78,10 +113,16 @@ def main(input_path, output_path, cookies_browser):
 
     successes = 0
     failures = 0
+    skipped = 0
     total = len(links)
 
     for idx, link in enumerate(links, start=1):
         print(f"[{idx}/{total}] Downloading: {link}")
+        if already_downloaded(link, output_dir):
+            skipped += 1
+            print("  -> Skipped (already in output)")
+            continue
+
         ok = download_video(link, output_dir, cookies_browser=cookies_browser)
         if ok:
             successes += 1
@@ -90,12 +131,12 @@ def main(input_path, output_path, cookies_browser):
             failures += 1
             print("  -> Failed")
 
-    print(f"Finished. Successes: {successes}, Failures: {failures}, Total: {total}")
+    print(
+        f"Finished. Successes: {successes}, Skipped: {skipped}, "
+        f"Failures: {failures}, Total: {total}"
+    )
     if failures:
-        print(
-            "Hint: if videos fail with bot/sign-in checks, log in to YouTube in a browser and run with "
-            "--cookies-browser chrome|edge|firefox (or use default auto)."
-        )
+        print("Hint: try updating yt-dlp (`yt-dlp -U`) and rerun.")
 
 
 if __name__ == "__main__":
@@ -116,8 +157,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--cookies-browser",
-        default="auto",
-        help="Browser for yt-dlp cookies (e.g., chrome, edge, firefox), 'auto' to try common browsers, or 'none'",
+        default="none",
+        help="Browser for yt-dlp cookies (e.g., chrome, edge, firefox), or 'none'",
     )
 
     args = parser.parse_args()
