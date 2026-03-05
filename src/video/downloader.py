@@ -1,13 +1,8 @@
-import argparse
 import json
 import re
 import subprocess
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT = PROJECT_ROOT / "config" / "video_sources.json"
-DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "raw_videos"
 
 
 def load_input(json_path):
@@ -46,18 +41,15 @@ def extract_video_id(video_link):
     host = parsed.netloc.lower()
     path = parsed.path.strip("/")
 
-    # https://www.youtube.com/watch?v=<id>
     if "youtube.com" in host:
         qs = parse_qs(parsed.query)
         if "v" in qs and qs["v"]:
             return qs["v"][0]
 
-        # https://www.youtube.com/shorts/<id> or /embed/<id>
         parts = path.split("/")
         if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
             return parts[1]
 
-    # https://youtu.be/<id>
     if "youtu.be" in host and path:
         return path.split("/")[0]
 
@@ -66,7 +58,7 @@ def extract_video_id(video_link):
 
 def already_downloaded(video_link, output_dir):
     """
-    Check whether a file for this video ID already exists in output_dir.
+    Check whether a file for this video ID already exists.
     """
     video_id = extract_video_id(video_link)
     if not video_id:
@@ -74,16 +66,17 @@ def already_downloaded(video_link, output_dir):
 
     safe_id = re.escape(video_id)
     pattern = re.compile(rf".*\[{safe_id}\]\.[^.]+$")
+
     for file_path in Path(output_dir).glob("*"):
         if file_path.is_file() and pattern.match(file_path.name):
             return True
+
     return False
 
 
 def download_video(video_link, output_dir, cookies_browser="none"):
     """
-    Use yt-dlp to download a single video link.
-    Returns True on success, False on failure.
+    Download a single video with yt-dlp.
     """
     output_template = str(Path(output_dir) / "%(title)s [%(id)s].%(ext)s")
 
@@ -98,15 +91,17 @@ def download_video(video_link, output_dir, cookies_browser="none"):
         base_cmd.extend(["--cookies-from-browser", cookies_browser])
 
     cmd = [*base_cmd, video_link]
+
     result = subprocess.run(cmd, check=False)
+
     return result.returncode == 0
 
 
-def main(input_path, output_path, cookies_browser):
+def download_from_json(input_path, output_dir, cookies_browser="none"):
     """
-    Load input JSON and download each video, printing successes.
+    Batch download from JSON list.
     """
-    output_dir = Path(output_path)
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     links = load_input(input_path)
@@ -118,12 +113,14 @@ def main(input_path, output_path, cookies_browser):
 
     for idx, link in enumerate(links, start=1):
         print(f"[{idx}/{total}] Downloading: {link}")
+
         if already_downloaded(link, output_dir):
             skipped += 1
-            print("  -> Skipped (already in output)")
+            print("  -> Skipped (already exists)")
             continue
 
-        ok = download_video(link, output_dir, cookies_browser=cookies_browser)
+        ok = download_video(link, output_dir, cookies_browser)
+
         if ok:
             successes += 1
             print("  -> Success")
@@ -132,34 +129,9 @@ def main(input_path, output_path, cookies_browser):
             print("  -> Failed")
 
     print(
-        f"Finished. Successes: {successes}, Skipped: {skipped}, "
-        f"Failures: {failures}, Total: {total}"
+        f"\nFinished. Successes: {successes}, "
+        f"Skipped: {skipped}, Failures: {failures}, Total: {total}"
     )
+
     if failures:
-        print("Hint: try updating yt-dlp (`yt-dlp -U`) and rerun.")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Download videos using yt-dlp from a JSON list"
-    )
-    parser.add_argument(
-        "-i",
-        "--input",
-        default=str(DEFAULT_INPUT),
-        help="Path to input JSON file (expects {'videos': [...]})",
-    )
-    parser.add_argument(
-        "-o",
-        "--output",
-        default=str(DEFAULT_OUTPUT),
-        help="Output directory for downloaded videos",
-    )
-    parser.add_argument(
-        "--cookies-browser",
-        default="none",
-        help="Browser for yt-dlp cookies (e.g., chrome, edge, firefox), or 'none'",
-    )
-
-    args = parser.parse_args()
-    main(args.input, args.output, args.cookies_browser)
+        print("Hint: try updating yt-dlp (`yt-dlp -U`).")
